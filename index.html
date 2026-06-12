@@ -1,0 +1,926 @@
+<<script>
+// ============================================================================
+// TASK MAJANI - Enterprise Task Tracker v3.1
+// Refactored & Optimized
+// ============================================================================
+
+const CONFIG = {
+    APP_NAME: 'Task Majani',
+    VERSION: '3.1',
+    STORAGE_PREFIX: 'tm_v3_',
+    OUTSPOKEN: 'Done'
+};
+
+const LEAD_STAGES = ["New Lead","Contacted","Interested","Proposal Sent","Negotiation","Follow-up","Won","Lost","Dormant"];
+const ROLES = {
+    ADMIN: { label: 'Admin', permissions: ['full'] },
+    MANAGER: { label: 'Manager', permissions: ['edit', 'view'] }
+};
+const DEMO_USERS = {
+    admin: { password: 'admin123', role: 'ADMIN', name: 'Admin' },
+    manager: { password: 'manager123', role: 'MANAGER', name: 'Manager' }
+};
+
+let AppState = {
+    tasks: [], leads: [], projects: [], activities: [], goals: [], files: [],
+    currentUser: null, charts: {}, initialized: false
+};
+
+console.log('[DEBUG] Script loaded, CONFIG:', CONFIG);
+
+// SECURITY: HTML Escape Helper
+function escapeHTML(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+// Storage Layer
+const Storage = {
+    save(key, data) {
+        try {
+            localStorage.setItem(CONFIG.STORAGE_PREFIX + key, JSON.stringify(data));
+            return true;
+        } catch (e) {
+            console.error('[DEBUG] Storage save failed:', e);
+            return false;
+        }
+    },
+    load(key, fallback) {
+        try {
+            const item = localStorage.getItem(CONFIG.STORAGE_PREFIX + key);
+            return item ? JSON.parse(item) : (fallback || []);
+        } catch (e) {
+            console.error('[DEBUG] Storage load failed:', e);
+            return fallback || [];
+        }
+    },
+    remove(key) {
+        localStorage.removeItem(CONFIG.STORAGE_PREFIX + key);
+    }
+};
+
+// ID Generator
+const IDGenerator = {
+    generate(prefix, items) {
+        const year = new Date().getFullYear();
+        let max = 0;
+        items.forEach(function(i) {
+            if (i.id && i.id.startsWith(prefix)) {
+                const parts = i.id.split('-');
+                if (parts.length >= 3) {
+                    const num = parseInt(parts[2], 10);
+                    if (!isNaN(num) && num > max) max = num;
+                }
+            }
+        });
+        return prefix + '-' + year + '-' + String(max + 1).padStart(4, '0');
+    },
+    generateTask(items) { return this.generate('TASK', items); },
+    generateLead(items) { return this.generate('LEAD', items); },
+    generateProject(items) { return this.generate('PROJ', items); },
+    generateActivity(items) { return this.generate('ACT', items); },
+    generateGoal(items) { return this.generate('GOAL', items); }
+};
+
+// Toast
+function showToast(message, type) {
+    type = type || 'info';
+    const container = document.getElementById('toastContainer');
+    if (!container) { console.error('[DEBUG] toastContainer not found'); return; }
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-' + type;
+    const icon = type === 'success' ? 'fa-check-circle' : type === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle';
+    toast.innerHTML = '<i class="fas ' + icon + '"></i><span>' + escapeHTML(message) + '</span>';
+    container.appendChild(toast);
+    setTimeout(function() {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100%)';
+        setTimeout(function() { toast.remove(); }, 300);
+    }, 3000);
+}
+
+// Initialization
+function init() {
+    console.log('[DEBUG] init() called');
+    
+    AppState.tasks = Storage.load('tasks', []);
+    AppState.leads = Storage.load('leads', []);
+    AppState.projects = Storage.load('projects', []);
+    AppState.activities = Storage.load('activities', []);
+    AppState.goals = Storage.load('goals', []);
+
+    console.log('[DEBUG] Loaded state:', { tasks: AppState.tasks.length, leads: AppState.leads.length });
+
+    if (AppState.tasks.length === 0 && AppState.leads.length === 0) {
+        console.log('[DEBUG] Seeding demo data');
+        seedDemoData();
+    }
+
+    applyTheme(Storage.load('settings', { theme: 'light' }).theme);
+
+    const savedUser = Storage.load('currentUser', null);
+    console.log('[DEBUG] savedUser:', savedUser);
+
+    if (savedUser) {
+        console.log('[DEBUG] Restoring session');
+        AppState.currentUser = savedUser;
+        renderApp();
+    } else {
+        console.log('[DEBUG] No session, showing login');
+        renderLogin();
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeModal();
+    });
+}
+
+function seedDemoData() {
+    console.log('[DEBUG] seedDemoData()');
+    const demoTasks = [
+        { name: "Title Audit", project: "Audit", owner: "Joan", priority: "High", status: "In Progress", percentComplete: 45, dueDate: "2026-06-15", daysOverdue: 2 },
+        { name: "Q2 Financial Review", project: "Finance", owner: "Mark", priority: "High", status: "Not Started", percentComplete: 0, dueDate: "2026-06-20", daysOverdue: 0 },
+        { name: "Client Onboarding", project: "Sales", owner: "Sarah", priority: "Medium", status: "Done", percentComplete: 100, dueDate: "2026-06-10", daysOverdue: 0 }
+    ];
+
+    demoTasks.forEach(function(t) {
+        AppState.tasks.push({
+            id: IDGenerator.generateTask(AppState.tasks),
+            name: t.name, project: t.project, owner: t.owner, priority: t.priority,
+            status: t.status, percentComplete: t.percentComplete, dueDate: t.dueDate,
+            daysOverdue: t.daysOverdue,
+            signal: t.daysOverdue > 0 ? 'OVERDUE' : 'ON TRACK',
+            month: 'Jun', year: 2026, createdDate: '2026-06-01',
+            activities: [], files: []
+        });
+    });
+
+    AppState.leads.push({
+        id: IDGenerator.generateLead(AppState.leads),
+        name: "Demo Lead", contact: "+254700000", company: "Demo Ltd",
+        stage: "Interested", value: 250000, lastContactDate: "2026-06-01",
+        followUpDate: "2026-06-10", assignedTo: "Admin", source: "Web",
+        notes: "", archived: false, converted: false
+    });
+
+    AppState.goals.push({
+        id: IDGenerator.generateGoal(AppState.goals),
+        title: "Read Reports", target: 100, current: 30, unit: "Pages",
+        startDate: "2026-06-01", endDate: "2026-06-30",
+        description: "Finish Q2 reports", logs: []
+    });
+
+    saveAll();
+}
+
+function saveAll() {
+    Storage.save('tasks', AppState.tasks);
+    Storage.save('leads', AppState.leads);
+    Storage.save('projects', AppState.projects);
+    Storage.save('activities', AppState.activities);
+    Storage.save('goals', AppState.goals);
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+}
+
+function toggleTheme() {
+    const cur = document.documentElement.getAttribute('data-theme') || 'light';
+    const next = cur === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    Storage.save('settings', { theme: next });
+}
+
+// AUTHENTICATION
+function renderLogin() {
+    console.log('[DEBUG] renderLogin()');
+    const appRoot = document.getElementById('appRoot');
+    if (!appRoot) { console.error('[DEBUG] appRoot not found!'); return; }
+    
+    appRoot.innerHTML =
+        '<div class="login-screen">' +
+            '<div class="login-box">' +
+                '<div class="login-logo"><i class="fas fa-leaf"></i></div>' +
+                '<h2>' + escapeHTML(CONFIG.APP_NAME) + '</h2>' +
+                '<p>Enterprise Task Tracker</p>' +
+                '<input type="text" id="loginUser" placeholder="Username" value="admin" autocomplete="username">' +
+                '<input type="password" id="loginPass" placeholder="Password" value="admin123" autocomplete="current-password">' +
+                '<button class="btn btn-primary" style="width:100%;padding:0.875rem;" onclick="handleLogin()">' +
+                    '<i class="fas fa-sign-in-alt"></i> Sign In' +
+                '</button>' +
+                '<div class="login-error" id="loginError"></div>' +
+                '<div class="login-hint">' +
+                    '<strong>Demo Credentials:</strong><br>' +
+                    'Admin: admin / admin123<br>' +
+                    'Manager: manager / manager123' +
+                '</div>' +
+            '</div>' +
+        '</div>';
+    console.log('[DEBUG] Login HTML rendered');
+}
+
+function handleLogin() {
+    console.log('[DEBUG] handleLogin() clicked');
+    
+    const userInput = document.getElementById('loginUser');
+    const passInput = document.getElementById('loginPass');
+    
+    if (!userInput || !passInput) {
+        console.error('[DEBUG] Login inputs not found!');
+        return;
+    }
+    
+    const u = userInput.value.trim().toLowerCase();
+    const p = passInput.value.trim();
+    
+    console.log('[DEBUG] Username entered:', u);
+    console.log('[DEBUG] Password length:', p.length);
+    
+    const user = DEMO_USERS[u];
+    console.log('[DEBUG] User found:', user);
+
+    if (user && user.password === p) {
+        console.log('[DEBUG] Login successful');
+        AppState.currentUser = { name: user.name, username: u, role: user.role };
+        Storage.save('currentUser', AppState.currentUser);
+        showToast('Welcome back, ' + escapeHTML(user.name) + '!', 'success');
+        renderApp();
+    } else {
+        console.log('[DEBUG] Login failed - user:', user, 'password match:', user ? user.password === p : 'N/A');
+        const errorDiv = document.getElementById('loginError');
+        if (errorDiv) errorDiv.innerText = 'Invalid credentials';
+        showToast('Invalid credentials', 'error');
+    }
+}
+
+function handleLogout() {
+    Storage.remove('currentUser');
+    AppState.currentUser = null;
+    Object.keys(AppState.charts).forEach(function(key) {
+        if (AppState.charts[key]) {
+            AppState.charts[key].destroy();
+            AppState.charts[key] = null;
+        }
+    });
+    renderLogin();
+    showToast('Logged out successfully', 'info');
+}
+
+// APP SHELL
+function renderApp() {
+    console.log('[DEBUG] renderApp()');
+    const appRoot = document.getElementById('appRoot');
+    if (!appRoot) { console.error('[DEBUG] appRoot not found in renderApp!'); return; }
+    
+    appRoot.innerHTML =
+        '<aside class="sidebar">' +
+            '<div class="logo-area">' +
+                '<div class="logo-img"><i class="fas fa-leaf"></i></div>' +
+                '<div>' +
+                    '<strong style="font-size:1.1rem;">' + escapeHTML(CONFIG.APP_NAME) + '</strong><br>' +
+                    '<span style="font-size:0.7rem;opacity:0.7;">ERP + Reports</span>' +
+                '</div>' +
+            '</div>' +
+            '<nav>' +
+                '<div class="nav-item" data-page="dashboard"><i class="fas fa-chart-line"></i> Dashboard</div>' +
+                '<div class="nav-item" data-page="tasks"><i class="fas fa-list-check"></i> Tasks</div>' +
+                '<div class="nav-item" data-page="leads"><i class="fas fa-address-book"></i> CRM Leads</div>' +
+                '<div class="nav-item" data-page="pipeline"><i class="fas fa-filter"></i> Pipeline</div>' +
+                '<div class="nav-item" data-page="goals"><i class="fas fa-bullseye"></i> Goals</div>' +
+                '<div class="nav-item" data-page="calendar"><i class="fas fa-calendar"></i> Calendar</div>' +
+                '<div class="nav-item" data-page="reports"><i class="fas fa-print"></i> Reports</div>' +
+                '<div style="margin-top:1rem;padding:0 1.5rem;font-size:0.7rem;opacity:0.5;text-transform:uppercase;letter-spacing:0.1em;">Settings</div>' +
+                '<div class="nav-item" onclick="toggleTheme()"><i class="fas fa-moon"></i> Dark Mode</div>' +
+                '<div class="nav-item" onclick="handleLogout()"><i class="fas fa-sign-out-alt"></i> Logout</div>' +
+            '</nav>' +
+        '</aside>' +
+        '<main class="main-content">' +
+            '<div class="top-bar">' +
+                '<div style="display:flex;align-items:center;gap:1rem;">' +
+                    '<h2 id="pageTitle" style="font-size:1.25rem;font-weight:700;">Dashboard</h2>' +
+                '</div>' +
+                '<div style="display:flex;align-items:center;gap:1rem;">' +
+                    '<span class="badge badge-info"><i class="fas fa-user"></i> ' + escapeHTML(AppState.currentUser.name) + '</span>' +
+                    '<span class="badge" style="background:var(--primary-light);color:var(--primary);">' + escapeHTML(ROLES[AppState.currentUser.role].label || AppState.currentUser.role) + '</span>' +
+                '</div>' +
+            '</div>' +
+            '<div class="content-pane fade-in" id="pageContainer"></div>' +
+        '</main>';
+
+    document.querySelectorAll('.nav-item[data-page]').forEach(function(el) {
+        el.addEventListener('click', function() {
+            showPage(el.getAttribute('data-page'));
+        });
+    });
+
+    showPage('dashboard');
+}
+
+async function showPage(page) {
+    document.querySelectorAll('.nav-item').forEach(function(n) { n.classList.remove('active'); });
+    const activeNav = document.querySelector('.nav-item[data-page="' + page + '"]');
+    if (activeNav) activeNav.classList.add('active');
+    document.getElementById('pageTitle').innerText = page.charAt(0).toUpperCase() + page.slice(1);
+
+    Object.keys(AppState.charts).forEach(function(key) {
+        if (AppState.charts[key]) {
+            AppState.charts[key].destroy();
+            AppState.charts[key] = null;
+        }
+    });
+
+    switch (page) {
+        case 'dashboard': await renderDashboard(); break;
+        case 'tasks': await renderTasks(); break;
+        case 'leads': await renderLeads(); break;
+        case 'pipeline': await renderPipeline(); break;
+        case 'goals': await renderGoals(); break;
+        case 'calendar': await renderCalendar(); break;
+        case 'reports': await renderReports(); break;
+        default:
+            document.getElementById('pageContainer').innerHTML =
+                '<div class="card"><div class="card-body" style="text-align:center;padding:3rem;">' +
+                '<i class="fas fa-tools" style="font-size:3rem;color:var(--text-secondary);margin-bottom:1rem;"></i>' +
+                '<h3>Module Coming Soon</h3><p style="color:var(--text-secondary);">This feature is under development.</p>' +
+                '</div></div>';
+    }
+}
+
+// MODAL
+function openModal(title, bodyHTML) {
+    document.getElementById('modalTitle').innerText = title;
+    document.getElementById('modalBody').innerHTML = bodyHTML;
+    document.getElementById('modalOverlay').classList.add('active');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeModal() {
+    document.getElementById('modalOverlay').classList.remove('active');
+    document.getElementById('modalBody').innerHTML = '';
+    document.body.style.overflow = '';
+}
+
+// DASHBOARD
+async function renderDashboard() {
+    const tasks = AppState.tasks;
+    const overdue = tasks.filter(function(t) { return t.daysOverdue > 0; }).length;
+    const leads = AppState.leads.filter(function(l) { return !l.archived; });
+    const pipelineValue = leads.reduce(function(s, l) { return s + (l.value || 0); }, 0);
+    const goals = AppState.goals;
+    const activeGoals = goals.filter(function(g) { return new Date(g.endDate) >= new Date(); }).length;
+    const completedTasks = tasks.filter(function(t) { return t.status === CONFIG.OUTSPOKEN; }).length;
+
+    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1.5rem;margin-bottom:2rem;">';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-tasks"></i></div><div class="stat-value">' + tasks.length + '</div><div class="stat-label">Total Tasks</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-check-circle" style="color:var(--success)"></i></div><div class="stat-value" style="color:var(--success)">' + completedTasks + '</div><div class="stat-label">' + CONFIG.OUTSPOKEN + '</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-clock" style="color:var(--danger)"></i></div><div class="stat-value" style="color:var(--danger)">' + overdue + '</div><div class="stat-label">Overdue</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-chart-line" style="color:var(--warning)"></i></div><div class="stat-value" style="color:var(--warning)">KES ' + pipelineValue.toLocaleString() + '</div><div class="stat-label">Pipeline Value</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-bullseye" style="color:var(--info)"></i></div><div class="stat-value" style="color:var(--info)">' + activeGoals + '</div><div class="stat-label">Active Goals</div></div>';
+    html += '</div>';
+
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:1.5rem;">';
+    html += '<div class="card"><div class="card-header"><i class="fas fa-chart-pie"></i> Task Status Distribution</div><div class="card-body"><canvas id="statusChartDash"></canvas></div></div>';
+    html += '<div class="card"><div class="card-header"><i class="fas fa-exclamation-triangle" style="color:var(--danger)"></i> Top Overdue Tasks</div><div class="card-body"><table class="data-table"><thead><tr><th>Task</th><th>Owner</th><th>Days Overdue</th></tr></thead><tbody>';
+
+    const overdueTasks = tasks.filter(function(t) { return t.daysOverdue > 0; }).slice(0, 5);
+    if (overdueTasks.length > 0) {
+        overdueTasks.forEach(function(t) {
+            html += '<tr><td>' + escapeHTML(t.name) + '</td><td>' + escapeHTML(t.owner) + '</td><td><span class="badge badge-danger">' + t.daysOverdue + '</span></td></tr>';
+        });
+    } else {
+        html += '<tr><td colspan="3" style="text-align:center;color:var(--text-secondary);">No overdue tasks</td></tr>';
+    }
+    html += '</tbody></table></div></div></div>';
+
+    html += '<div class="card" style="margin-top:1.5rem;"><div class="card-header"><i class="fas fa-bolt"></i> Recent Activity</div><div class="card-body"><table class="data-table"><thead><tr><th>Task</th><th>Status</th><th>Due Date</th><th>Progress</th></tr></thead><tbody>';
+    tasks.slice(0, 5).forEach(function(t) {
+        const badgeClass = t.status === CONFIG.OUTSPOKEN ? 'badge-success' : (t.status === 'In Progress' ? 'badge-info' : 'badge-warning');
+        html += '<tr><td>' + escapeHTML(t.name) + '</td><td><span class="badge ' + badgeClass + '">' + escapeHTML(t.status) + '</span></td><td>' + escapeHTML(t.dueDate || '-') + '</td><td><div class="progress-bar" style="width:120px;"><div class="progress-fill" style="width:' + Math.min(100, t.percentComplete) + '%;"></div></div><small>' + t.percentComplete + '%</small></td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+
+    document.getElementById('pageContainer').innerHTML = html;
+
+    const statusCount = { 'In Progress': 0, [CONFIG.OUTSPOKEN]: 0, 'Not Started': 0 };
+    tasks.forEach(function(t) {
+        if (statusCount[t.status] !== undefined) statusCount[t.status]++;
+    });
+
+    if (AppState.charts.statusChartDash) {
+        AppState.charts.statusChartDash.destroy();
+        AppState.charts.statusChartDash = null;
+    }
+
+    const ctx = document.getElementById('statusChartDash');
+    if (ctx) {
+        AppState.charts.statusChartDash = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: Object.keys(statusCount),
+                datasets: [{
+                    data: Object.values(statusCount),
+                    backgroundColor: ['#3b82f6', '#10b981', '#94a3b8'],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: { legend: { position: 'bottom' } }
+            }
+        });
+    }
+}
+
+// TASKS
+async function renderTasks() {
+    const tasks = AppState.tasks;
+    const filterStatus = document.getElementById('taskFilterStatus')?.value || 'All';
+    const filterPriority = document.getElementById('taskFilterPriority')?.value || 'All';
+    const searchTerm = document.getElementById('taskSearch')?.value?.toLowerCase() || '';
+
+    let filtered = tasks;
+    if (filterStatus !== 'All') filtered = filtered.filter(function(t) { return t.status === filterStatus; });
+    if (filterPriority !== 'All') filtered = filtered.filter(function(t) { return t.priority === filterPriority; });
+    if (searchTerm) filtered = filtered.filter(function(t) { return t.name.toLowerCase().includes(searchTerm) || t.owner.toLowerCase().includes(searchTerm); });
+
+    let html = '<div class="section-header"><h3><i class="fas fa-list-check"></i> All Tasks</h3><button class="btn btn-primary" onclick="openTaskModal()"><i class="fas fa-plus"></i> New Task</button></div>';
+    html += '<div class="filter-bar">';
+    html += '<input type="text" id="taskSearch" placeholder="Search tasks..." value="' + escapeHTML(searchTerm) + '" oninput="renderTasks()">';
+    html += '<select id="taskFilterStatus" onchange="renderTasks()"><option value="All">All Status</option><option value="Not Started">Not Started</option><option value="In Progress">In Progress</option><option value="' + CONFIG.OUTSPOKEN + '">' + CONFIG.OUTSPOKEN + '</option></select>';
+    html += '<select id="taskFilterPriority" onchange="renderTasks()"><option value="All">All Priority</option><option value="Low">Low</option><option value="Medium">Medium</option><option value="High">High</option></select>';
+    html += '</div>';
+    html += '<div class="card"><div class="card-body"><table class="data-table"><thead><tr><th>Title</th><th>Project</th><th>Owner</th><th>Priority</th><th>Status</th><th>Due Date</th><th>Progress</th><th>Actions</th></tr></thead><tbody>';
+
+    if (filtered.length > 0) {
+        filtered.forEach(function(t) {
+            const priorityBadge = t.priority === 'High' ? 'badge-danger' : (t.priority === 'Medium' ? 'badge-warning' : 'badge-info');
+            const statusBadge = t.status === CONFIG.OUTSPOKEN ? 'badge-success' : (t.status === 'In Progress' ? 'badge-info' : 'badge-warning');
+            html += '<tr>';
+            html += '<td><strong>' + escapeHTML(t.name) + '</strong></td>';
+            html += '<td>' + escapeHTML(t.project || '-') + '</td>';
+            html += '<td>' + escapeHTML(t.owner) + '</td>';
+            html += '<td><span class="badge ' + priorityBadge + '">' + escapeHTML(t.priority) + '</span></td>';
+            html += '<td><span class="badge ' + statusBadge + '">' + escapeHTML(t.status) + '</span></td>';
+            html += '<td>' + escapeHTML(t.dueDate || '-') + '</td>';
+            html += '<td><div class="progress-bar" style="width:80px;"><div class="progress-fill" style="width:' + Math.min(100, t.percentComplete) + '%;"></div></div><small>' + t.percentComplete + '%</small></td>';
+            html += '<td><button class="btn btn-outline btn-sm" onclick="openTaskModal(\'' + escapeHTML(t.id) + '\')"><i class="fas fa-edit"></i></button> <button class="btn btn-danger btn-sm" onclick="deleteTaskItem(\'' + escapeHTML(t.id) + '\')"><i class="fas fa-trash"></i></button></td>';
+            html += '</tr>';
+        });
+    } else {
+        html += '<tr><td colspan="8" style="text-align:center;padding:2rem;color:var(--text-secondary);">No tasks found</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+
+    document.getElementById('pageContainer').innerHTML = html;
+}
+
+function openTaskModal(id) {
+    const task = id ? AppState.tasks.find(function(t) { return t.id === id; }) : null;
+    const isEdit = !!task;
+
+    let bodyHTML = '<input type="hidden" id="taskIdVal" value="' + escapeHTML(task?.id || '') + '">';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Task Name</label><input id="taskName" value="' + escapeHTML(task?.name || '') + '" placeholder="Enter task name"></div>';
+    bodyHTML += '<div class="form-group"><label>Project</label><input id="taskProject" value="' + escapeHTML(task?.project || '') + '" placeholder="Project name"></div></div>';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Owner</label><input id="taskOwner" value="' + escapeHTML(task?.owner || '') + '" placeholder="Assigned to"></div>';
+    bodyHTML += '<div class="form-group"><label>Priority</label><select id="taskPriority"><option ' + (task?.priority === 'Low' ? 'selected' : '') + '>Low</option><option ' + (task?.priority === 'Medium' ? 'selected' : '') + '>Medium</option><option ' + (task?.priority === 'High' ? 'selected' : '') + '>High</option></select></div></div>';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Status</label><select id="taskStatus"><option ' + (task?.status === 'Not Started' ? 'selected' : '') + '>Not Started</option><option ' + (task?.status === 'In Progress' ? 'selected' : '') + '>In Progress</option><option ' + (task?.status === CONFIG.OUTSPOKEN ? 'selected' : '') + '>' + CONFIG.OUTSPOKEN + '</option></select></div>';
+    bodyHTML += '<div class="form-group"><label>Due Date</label><input type="date" id="taskDue" value="' + escapeHTML(task?.dueDate || '') + '"></div></div>';
+    bodyHTML += '<div class="form-group"><label>Progress (%)</label><input type="number" id="taskProgress" min="0" max="100" value="' + (task?.percentComplete || 0) + '"></div>';
+    bodyHTML += '<div class="form-group"><label>Days Overdue</label><input type="number" id="taskOverdue" min="0" value="' + (task?.daysOverdue || 0) + '"></div>';
+    bodyHTML += '<div style="display:flex;gap:1rem;justify-content:flex-end;margin-top:1.5rem;"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveTaskModal()"><i class="fas fa-save"></i> ' + (isEdit ? 'Update' : 'Create') + ' Task</button></div>';
+
+    openModal(isEdit ? 'Edit Task' : 'New Task', bodyHTML);
+}
+
+function saveTaskModal() {
+    const id = document.getElementById('taskIdVal').value;
+    const name = document.getElementById('taskName').value.trim();
+    if (!name) {
+        showToast('Task name is required', 'error');
+        return;
+    }
+
+    const newTask = {
+        name: name,
+        project: document.getElementById('taskProject').value.trim(),
+        owner: document.getElementById('taskOwner').value.trim(),
+        priority: document.getElementById('taskPriority').value,
+        status: document.getElementById('taskStatus').value,
+        dueDate: document.getElementById('taskDue').value,
+        percentComplete: parseInt(document.getElementById('taskProgress').value) || 0,
+        daysOverdue: parseInt(document.getElementById('taskOverdue').value) || 0,
+        signal: (parseInt(document.getElementById('taskOverdue').value) || 0) > 0 ? 'OVERDUE' : 'ON TRACK'
+    };
+
+    if (id) {
+        const idx = AppState.tasks.findIndex(function(t) { return t.id === id; });
+        if (idx >= 0) {
+            AppState.tasks[idx] = Object.assign({}, AppState.tasks[idx], newTask);
+            showToast('Task updated successfully', 'success');
+        }
+    } else {
+        newTask.id = IDGenerator.generateTask(AppState.tasks);
+        newTask.createdDate = new Date().toISOString().split('T')[0];
+        newTask.month = new Date().toLocaleString('default', { month: 'short' });
+        newTask.year = new Date().getFullYear();
+        newTask.activities = [];
+        newTask.files = [];
+        AppState.tasks.push(newTask);
+        showToast('Task created successfully', 'success');
+    }
+
+    saveAll();
+    closeModal();
+    renderTasks();
+}
+
+function deleteTaskItem(id) {
+    const task = AppState.tasks.find(function(t) { return t.id === id; });
+    if (confirm('Are you sure you want to delete "' + (task?.name || 'this task') + '"?')) {
+        AppState.tasks = AppState.tasks.filter(function(t) { return t.id !== id; });
+        saveAll();
+        showToast('Task deleted', 'info');
+        renderTasks();
+    }
+}
+
+// LEADS
+async function renderLeads() {
+    const leads = AppState.leads.filter(function(l) { return !l.archived; });
+    const searchTerm = document.getElementById('leadSearch')?.value?.toLowerCase() || '';
+    const filterStage = document.getElementById('leadFilterStage')?.value || 'All';
+
+    let filtered = leads;
+    if (searchTerm) filtered = filtered.filter(function(l) { return l.name.toLowerCase().includes(searchTerm) || (l.company || '').toLowerCase().includes(searchTerm); });
+    if (filterStage !== 'All') filtered = filtered.filter(function(l) { return l.stage === filterStage; });
+
+    let html = '<div class="section-header"><h3><i class="fas fa-address-book"></i> CRM Leads</h3><button class="btn btn-primary" onclick="openLeadModal()"><i class="fas fa-plus"></i> Add Lead</button></div>';
+    html += '<div class="filter-bar">';
+    html += '<input type="text" id="leadSearch" placeholder="Search leads..." value="' + escapeHTML(searchTerm) + '" oninput="renderLeads()">';
+    html += '<select id="leadFilterStage" onchange="renderLeads()"><option value="All">All Stages</option>';
+    LEAD_STAGES.forEach(function(s) {
+        html += '<option value="' + escapeHTML(s) + '"' + (filterStage === s ? ' selected' : '') + '>' + escapeHTML(s) + '</option>';
+    });
+    html += '</select></div>';
+    html += '<div class="card"><div class="card-body"><table class="data-table"><thead><tr><th>Name</th><th>Company</th><th>Stage</th><th>Value (KES)</th><th>Follow-up</th><th>Assigned To</th><th>Actions</th></tr></thead><tbody>';
+
+    if (filtered.length > 0) {
+        filtered.forEach(function(l) {
+            const badgeClass = l.stage === 'Won' ? 'badge-success' : (l.stage === 'Lost' ? 'badge-danger' : 'badge-info');
+            html += '<tr>';
+            html += '<td><strong>' + escapeHTML(l.name) + '</strong></td>';
+            html += '<td>' + escapeHTML(l.company || '-') + '</td>';
+            html += '<td><span class="badge ' + badgeClass + '">' + escapeHTML(l.stage) + '</span></td>';
+            html += '<td>KES ' + (l.value || 0).toLocaleString() + '</td>';
+            html += '<td>' + escapeHTML(l.followUpDate || '-') + '</td>';
+            html += '<td>' + escapeHTML(l.assignedTo || '-') + '</td>';
+            html += '<td><button class="btn btn-outline btn-sm" onclick="openLeadModal(\'' + escapeHTML(l.id) + '\')"><i class="fas fa-edit"></i> Edit</button> <button class="btn btn-danger btn-sm" onclick="deleteLeadItem(\'' + escapeHTML(l.id) + '\')"><i class="fas fa-trash"></i></button></td>';
+            html += '</tr>';
+        });
+    } else {
+        html += '<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-secondary);">No leads found</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+
+    document.getElementById('pageContainer').innerHTML = html;
+}
+
+function openLeadModal(id) {
+    const lead = id ? AppState.leads.find(function(l) { return l.id === id; }) : null;
+    const isEdit = !!lead;
+
+    let bodyHTML = '<input type="hidden" id="leadIdVal" value="' + escapeHTML(lead?.id || '') + '">';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Lead Name *</label><input id="leadName" value="' + escapeHTML(lead?.name || '') + '" placeholder="Full name"></div>';
+    bodyHTML += '<div class="form-group"><label>Company</label><input id="leadCompany" value="' + escapeHTML(lead?.company || '') + '" placeholder="Company name"></div></div>';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Contact</label><input id="leadContact" value="' + escapeHTML(lead?.contact || '') + '" placeholder="Phone or email"></div>';
+    bodyHTML += '<div class="form-group"><label>Stage</label><select id="leadStage">';
+    LEAD_STAGES.forEach(function(s) {
+        bodyHTML += '<option value="' + escapeHTML(s) + '"' + (lead?.stage === s ? ' selected' : '') + '>' + escapeHTML(s) + '</option>';
+    });
+    bodyHTML += '</select></div></div>';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Value (KES)</label><input type="number" id="leadValue" value="' + (lead?.value || 0) + '" placeholder="0"></div>';
+    bodyHTML += '<div class="form-group"><label>Source</label><input id="leadSource" value="' + escapeHTML(lead?.source || '') + '" placeholder="e.g., Web, Referral"></div></div>';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Follow-up Date</label><input type="date" id="leadFollowup" value="' + escapeHTML(lead?.followUpDate || '') + '"></div>';
+    bodyHTML += '<div class="form-group"><label>Assigned To</label><input id="leadAssigned" value="' + escapeHTML(lead?.assignedTo || AppState.currentUser.name) + '" placeholder="Assignee"></div></div>';
+    bodyHTML += '<div class="form-group"><label>Notes</label><textarea id="leadNotes" rows="3" placeholder="Additional notes...">' + escapeHTML(lead?.notes || '') + '</textarea></div>';
+    bodyHTML += '<div style="display:flex;gap:1rem;justify-content:flex-end;margin-top:1.5rem;"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveLeadModal()"><i class="fas fa-save"></i> ' + (isEdit ? 'Update' : 'Create') + ' Lead</button></div>';
+
+    openModal(isEdit ? 'Edit Lead' : 'New Lead', bodyHTML);
+}
+
+function saveLeadModal() {
+    const id = document.getElementById('leadIdVal').value;
+    const name = document.getElementById('leadName').value.trim();
+    if (!name) {
+        showToast('Lead name is required', 'error');
+        return;
+    }
+
+    const data = {
+        name: name,
+        company: document.getElementById('leadCompany').value.trim(),
+        contact: document.getElementById('leadContact').value.trim(),
+        stage: document.getElementById('leadStage').value,
+        value: parseFloat(document.getElementById('leadValue').value) || 0,
+        source: document.getElementById('leadSource').value.trim(),
+        followUpDate: document.getElementById('leadFollowup').value,
+        assignedTo: document.getElementById('leadAssigned').value.trim(),
+        notes: document.getElementById('leadNotes').value.trim(),
+        lastContactDate: new Date().toISOString().split('T')[0]
+    };
+
+    if (id) {
+        const idx = AppState.leads.findIndex(function(l) { return l.id === id; });
+        if (idx >= 0) {
+            AppState.leads[idx] = Object.assign({}, AppState.leads[idx], data);
+            showToast('Lead updated successfully', 'success');
+        }
+    } else {
+        data.id = IDGenerator.generateLead(AppState.leads);
+        data.archived = false;
+        data.converted = false;
+        data.activities = [];
+        AppState.leads.push(data);
+        showToast('Lead created successfully', 'success');
+    }
+
+    saveAll();
+    closeModal();
+    renderLeads();
+}
+
+function deleteLeadItem(id) {
+    const lead = AppState.leads.find(function(l) { return l.id === id; });
+    if (confirm('Are you sure you want to delete "' + (lead?.name || 'this lead') + '"?')) {
+        AppState.leads = AppState.leads.filter(function(l) { return l.id !== id; });
+        saveAll();
+        showToast('Lead deleted', 'info');
+        renderLeads();
+    }
+}
+
+// PIPELINE
+async function renderPipeline() {
+    const leads = AppState.leads.filter(function(l) { return !l.archived; });
+    const stages = LEAD_STAGES;
+
+    let html = '<div class="section-header"><h3><i class="fas fa-filter"></i> Sales Pipeline</h3><div style="color:var(--text-secondary);">Total Pipeline: <strong style="color:var(--primary);">KES ' + leads.reduce(function(s, l) { return s + (l.value || 0); }, 0).toLocaleString() + '</strong></div></div>';
+    html += '<div class="card"><div class="card-body"><div class="pipeline-container">';
+
+    stages.forEach(function(stage) {
+        const stageLeads = leads.filter(function(l) { return l.stage === stage; });
+        const stageValue = stageLeads.reduce(function(s, l) { return s + (l.value || 0); }, 0);
+        html += '<div class="pipeline-column">';
+        html += '<div class="pipeline-column-header"><span>' + escapeHTML(stage) + '</span><span class="pipeline-count">' + stageLeads.length + '</span></div>';
+        html += '<div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.5rem;">KES ' + stageValue.toLocaleString() + '</div>';
+        stageLeads.forEach(function(l) {
+            html += '<div class="pipeline-card" onclick="openLeadModal(\'' + escapeHTML(l.id) + '\')">';
+            html += '<div style="font-weight:600;margin-bottom:0.25rem;">' + escapeHTML(l.name) + '</div>';
+            html += '<div style="font-size:0.8rem;color:var(--text-secondary);">' + escapeHTML(l.company || 'No company') + '</div>';
+            html += '<div class="pipeline-card-value">KES ' + (l.value || 0).toLocaleString() + '</div>';
+            html += '</div>';
+        });
+        html += '</div>';
+    });
+
+    html += '</div></div></div>';
+    document.getElementById('pageContainer').innerHTML = html;
+}
+
+// GOALS
+async function renderGoals() {
+    const goals = AppState.goals;
+
+    let html = '<div class="section-header"><h3><i class="fas fa-bullseye"></i> Goal Tracker</h3><button class="btn btn-primary" onclick="openGoalModal()"><i class="fas fa-plus"></i> New Goal</button></div>';
+    html += '<div id="goalsList">';
+
+    if (goals.length > 0) {
+        goals.forEach(function(g) {
+            const pct = g.target > 0 ? Math.min(100, Math.round((g.current / g.target) * 100)) : 0;
+            const isComplete = g.current >= g.target;
+            html += '<div class="card goal-card"><div class="card-body">';
+            html += '<div class="goal-header"><div><h4 style="font-weight:700;">' + escapeHTML(g.title) + '</h4><div class="goal-meta">' + escapeHTML(g.description || '') + '</div></div>';
+            html += '<span class="badge ' + (isComplete ? 'badge-success' : 'badge-info') + '">' + (isComplete ? 'Complete' : 'In Progress') + '</span></div>';
+            html += '<div style="display:flex;justify-content:space-between;margin:1rem 0;"><span>Progress: <strong>' + g.current + '/' + g.target + ' ' + escapeHTML(g.unit) + '</strong></span><span style="font-weight:700;color:var(--primary);">' + pct + '%</span></div>';
+            html += '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%;"></div></div>';
+            html += '<div style="display:flex;gap:0.5rem;margin-top:1rem;"><button class="btn btn-outline btn-sm" onclick="logGoal(\'' + escapeHTML(g.id) + '\')"><i class="fas fa-plus"></i> Log Progress</button><button class="btn btn-danger btn-sm" onclick="deleteGoalItem(\'' + escapeHTML(g.id) + '\')"><i class="fas fa-trash"></i></button></div>';
+            html += '</div></div>';
+        });
+    } else {
+        html += '<div class="card"><div class="card-body" style="text-align:center;padding:3rem;color:var(--text-secondary);">No goals set yet. Create your first goal!</div></div>';
+    }
+    html += '</div>';
+
+    document.getElementById('pageContainer').innerHTML = html;
+}
+
+function logGoal(id) {
+    const inc = prompt('How much progress to add?');
+    if (inc && !isNaN(parseInt(inc))) {
+        const goal = AppState.goals.find(function(g) { return g.id === id; });
+        if (goal) {
+            goal.current = Math.min(goal.target, goal.current + parseInt(inc));
+            goal.logs.push({ date: new Date().toISOString().split('T')[0], amount: parseInt(inc) });
+            saveAll();
+            showToast('Progress logged: +' + inc + ' ' + goal.unit, 'success');
+            renderGoals();
+        }
+    }
+}
+
+function openGoalModal() {
+    let bodyHTML = '<div class="form-group"><label>Goal Title *</label><input id="goalTitle" placeholder="e.g., Read 100 Pages"></div>';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Target *</label><input type="number" id="goalTarget" min="1" placeholder="100"></div>';
+    bodyHTML += '<div class="form-group"><label>Unit</label><input id="goalUnit" value="Pages" placeholder="e.g., Pages, Hours"></div></div>';
+    bodyHTML += '<div class="form-row"><div class="form-group"><label>Start Date</label><input type="date" id="goalStart" value="' + new Date().toISOString().split('T')[0] + '"></div>';
+    bodyHTML += '<div class="form-group"><label>End Date</label><input type="date" id="goalEnd" value=""></div></div>';
+    bodyHTML += '<div class="form-group"><label>Description</label><textarea id="goalDesc" rows="2" placeholder="What is this goal about?"></textarea></div>';
+    bodyHTML += '<div style="display:flex;gap:1rem;justify-content:flex-end;margin-top:1.5rem;"><button class="btn btn-outline" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="saveGoalModal()"><i class="fas fa-save"></i> Create Goal</button></div>';
+
+    openModal('New Goal', bodyHTML);
+}
+
+function saveGoalModal() {
+    const title = document.getElementById('goalTitle').value.trim();
+    const target = parseInt(document.getElementById('goalTarget').value);
+    if (!title || !target || target < 1) {
+        showToast('Please provide a valid title and target', 'error');
+        return;
+    }
+
+    const newGoal = {
+        id: IDGenerator.generateGoal(AppState.goals),
+        title: title,
+        target: target,
+        current: 0,
+        unit: document.getElementById('goalUnit').value.trim() || 'Items',
+        startDate: document.getElementById('goalStart').value || new Date().toISOString().split('T')[0],
+        endDate: document.getElementById('goalEnd').value || '',
+        description: document.getElementById('goalDesc').value.trim(),
+        logs: []
+    };
+
+    AppState.goals.push(newGoal);
+    saveAll();
+    showToast('Goal created successfully', 'success');
+    closeModal();
+    renderGoals();
+}
+
+function deleteGoalItem(id) {
+    const goal = AppState.goals.find(function(g) { return g.id === id; });
+    if (confirm('Are you sure you want to delete "' + (goal?.title || 'this goal') + '"?')) {
+        AppState.goals = AppState.goals.filter(function(g) { return g.id !== id; });
+        saveAll();
+        showToast('Goal deleted', 'info');
+        renderGoals();
+    }
+}
+
+// CALENDAR
+async function renderCalendar() {
+    const tasks = AppState.tasks;
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = today.getMonth();
+    const monthName = today.toLocaleString('default', { month: 'long' });
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const firstDay = new Date(year, month, 1).getDay();
+
+    let html = '<div class="section-header"><h3><i class="fas fa-calendar"></i> ' + monthName + ' ' + year + '</h3></div>';
+    html += '<div class="card"><div class="card-body">';
+    html += '<div class="calendar-grid">';
+
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    dayNames.forEach(function(d) {
+        html += '<div class="calendar-day-header">' + d + '</div>';
+    });
+
+    for (let i = 0; i < firstDay; i++) {
+        html += '<div class="calendar-day" style="background:transparent;border:none;"></div>';
+    }
+
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dateStr = year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+        const dayTasks = tasks.filter(function(t) { return t.dueDate === dateStr; });
+        const hasTask = dayTasks.length > 0;
+        html += '<div class="calendar-day ' + (hasTask ? 'has-task' : '') + '">';
+        html += '<div style="font-weight:700;margin-bottom:0.25rem;">' + day + '</div>';
+        dayTasks.forEach(function(t) {
+            const statusColor = t.status === CONFIG.OUTSPOKEN ? 'var(--success)' : (t.status === 'In Progress' ? 'var(--primary)' : 'var(--warning)');
+            html += '<div style="font-size:0.7rem;padding:0.15rem 0.3rem;background:' + statusColor + '20;color:' + statusColor + ';border-radius:0.25rem;margin-bottom:0.15rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;" onclick="openTaskModal(\'' + escapeHTML(t.id) + '\')">' + escapeHTML(t.name) + '</div>';
+        });
+        html += '</div>';
+    }
+
+    html += '</div></div></div>';
+
+    html += '<div class="card" style="margin-top:1.5rem;"><div class="card-header"><i class="fas fa-list"></i> Upcoming Deadlines</div><div class="card-body"><table class="data-table"><thead><tr><th>Task</th><th>Due Date</th><th>Status</th><th>Owner</th></tr></thead><tbody>';
+    const upcoming = tasks.filter(function(t) { return t.dueDate; }).sort(function(a, b) { return new Date(a.dueDate) - new Date(b.dueDate); }).slice(0, 10);
+    if (upcoming.length > 0) {
+        upcoming.forEach(function(t) {
+            const statusBadge = t.status === CONFIG.OUTSPOKEN ? 'badge-success' : (t.status === 'In Progress' ? 'badge-info' : 'badge-warning');
+            html += '<tr><td><strong>' + escapeHTML(t.name) + '</strong></td><td>' + escapeHTML(t.dueDate) + '</td><td><span class="badge ' + statusBadge + '">' + escapeHTML(t.status) + '</span></td><td>' + escapeHTML(t.owner) + '</td></tr>';
+        });
+    } else {
+        html += '<tr><td colspan="4" style="text-align:center;color:var(--text-secondary);">No upcoming deadlines</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+
+    document.getElementById('pageContainer').innerHTML = html;
+}
+
+// REPORTS
+async function renderReports() {
+    const tasks = AppState.tasks;
+    const leads = AppState.leads.filter(function(l) { return !l.archived; });
+    const goals = AppState.goals;
+
+    const totalTasks = tasks.length;
+    const completedTasks = tasks.filter(function(t) { return t.status === CONFIG.OUTSPOKEN; }).length;
+    const overdueTasks = tasks.filter(function(t) { return t.daysOverdue > 0; });
+    const pipelineValue = leads.reduce(function(s, l) { return s + (l.value || 0); }, 0);
+    const wonLeads = leads.filter(function(l) { return l.stage === 'Won'; }).length;
+    const conversion = leads.length > 0 ? ((wonLeads / leads.length) * 100).toFixed(1) : 0;
+    const goalAvg = goals.length > 0 ? (goals.reduce(function(s, g) { return s + (g.target > 0 ? (g.current / g.target * 100) : 0); }, 0) / goals.length).toFixed(0) : 0;
+
+    let html = '<div class="section-header"><h2><i class="fas fa-print"></i> Executive Report</h2><button class="btn btn-primary" onclick="window.print()"><i class="fas fa-print"></i> Print Report</button></div>';
+
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:2rem;">';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-tasks"></i></div><div class="stat-value">' + totalTasks + '</div><div class="stat-label">Total Tasks</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-check-circle" style="color:var(--success)"></i></div><div class="stat-value" style="color:var(--success)">' + completedTasks + '</div><div class="stat-label">' + CONFIG.OUTSPOKEN + '</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-clock" style="color:var(--danger)"></i></div><div class="stat-value" style="color:var(--danger)">' + overdueTasks.length + '</div><div class="stat-label">Overdue</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-chart-line" style="color:var(--warning)"></i></div><div class="stat-value" style="color:var(--warning)">KES ' + pipelineValue.toLocaleString() + '</div><div class="stat-label">Pipeline Value</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-percentage" style="color:var(--info)"></i></div><div class="stat-value" style="color:var(--info)">' + conversion + '%</div><div class="stat-label">Conversion Rate</div></div>';
+    html += '<div class="stat-card"><div class="stat-icon"><i class="fas fa-bullseye" style="color:var(--primary)"></i></div><div class="stat-value" style="color:var(--primary)">' + goalAvg + '%</div><div class="stat-label">Avg Goal Progress</div></div>';
+    html += '</div>';
+
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:1.5rem;">';
+
+    html += '<div class="card"><div class="card-header"><i class="fas fa-list-check"></i> Task Summary</div><div class="card-body"><table class="data-table"><thead><tr><th>Status</th><th>Count</th><th>Percentage</th></tr></thead><tbody>';
+    const statusSummary = {};
+    tasks.forEach(function(t) { statusSummary[t.status] = (statusSummary[t.status] || 0) + 1; });
+    Object.entries(statusSummary).forEach(function(_ref) { var status = _ref[0], count = _ref[1]; html += '<tr><td>' + escapeHTML(status) + '</td><td>' + count + '</td><td>' + (totalTasks > 0 ? ((count / totalTasks) * 100).toFixed(1) : 0) + '%</td></tr>'; });
+    html += '</tbody></table></div></div>';
+
+    html += '<div class="card"><div class="card-header"><i class="fas fa-filter"></i> Lead Pipeline</div><div class="card-body"><table class="data-table"><thead><tr><th>Stage</th><th>Count</th><th>Value (KES)</th></tr></thead><tbody>';
+    LEAD_STAGES.forEach(function(stage) {
+        const stageLeads = leads.filter(function(l) { return l.stage === stage; });
+        const stageValue = stageLeads.reduce(function(s, l) { return s + (l.value || 0); }, 0);
+        html += '<tr><td>' + escapeHTML(stage) + '</td><td>' + stageLeads.length + '</td><td>' + stageValue.toLocaleString() + '</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+
+    html += '<div class="card"><div class="card-header"><i class="fas fa-bullseye"></i> Goal Progress</div><div class="card-body"><table class="data-table"><thead><tr><th>Goal</th><th>Progress</th><th>Target</th><th>%</th></tr></thead><tbody>';
+    goals.forEach(function(g) {
+        const pct = g.target > 0 ? Math.round((g.current / g.target) * 100) : 0;
+        html += '<tr><td>' + escapeHTML(g.title) + '</td><td>' + g.current + '</td><td>' + g.target + ' ' + escapeHTML(g.unit) + '</td><td><div class="progress-bar" style="width:60px;display:inline-block;vertical-align:middle;margin-right:0.5rem;"><div class="progress-fill" style="width:' + Math.min(100, pct) + '%;"></div></div>' + pct + '%</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+
+    html += '<div class="card"><div class="card-header"><i class="fas fa-exclamation-triangle" style="color:var(--danger)"></i> Overdue Tasks</div><div class="card-body"><table class="data-table"><thead><tr><th>Task</th><th>Owner</th><th>Due Date</th><th>Days Overdue</th></tr></thead><tbody>';
+    if (overdueTasks.length > 0) {
+        overdueTasks.forEach(function(t) {
+            html += '<tr><td>' + escapeHTML(t.name) + '</td><td>' + escapeHTML(t.owner) + '</td><td>' + escapeHTML(t.dueDate || '-') + '</td><td><span class="badge badge-danger">' + t.daysOverdue + '</span></td></tr>';
+        });
+    } else {
+        html += '<tr><td colspan="4" style="text-align:center;color:var(--text-secondary);">No overdue tasks - great job!</td></tr>';
+    }
+    html += '</tbody></table></div></div>';
+
+    html += '</div>';
+
+    html += '<div class="card" style="margin-top:1.5rem;"><div class="card-header"><i class="fas fa-info-circle"></i> Report Metadata</div><div class="card-body"><p><i class="fas fa-calendar-alt"></i> Generated: ' + new Date().toLocaleString() + '</p><p><i class="fas fa-desktop"></i> System: ' + escapeHTML(CONFIG.APP_NAME) + ' v' + CONFIG.VERSION + '</p><p><i class="fas fa-user"></i> Generated by: ' + escapeHTML(AppState.currentUser.name) + ' (' + escapeHTML(AppState.currentUser.role) + ')</p><p style="color:var(--text-secondary);font-size:0.875rem;">All data reflects current local storage state. For audit purposes, export regularly.</p></div></div>';
+
+    document.getElementById('pageContainer').innerHTML = html;
+}
+
+// EXPORTS
+window.handleLogin = handleLogin;
+window.handleLogout = handleLogout;
+window.toggleTheme = toggleTheme;
+window.closeModal = closeModal;
+window.openTaskModal = openTaskModal;
+window.saveTaskModal = saveTaskModal;
+window.deleteTaskItem = deleteTaskItem;
+window.openLeadModal = openLeadModal;
+window.saveLeadModal = saveLeadModal;
+window.deleteLeadItem = deleteLeadItem;
+window.openGoalModal = openGoalModal;
+window.saveGoalModal = saveGoalModal;
+window.logGoal = logGoal;
+window.deleteGoalItem = deleteGoalItem;
+
+// BOOT
+console.log('[DEBUG] Script reaching end, calling init()');
+init();
+</script>
+</body>
+</html>
